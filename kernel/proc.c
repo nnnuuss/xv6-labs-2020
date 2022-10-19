@@ -120,6 +120,13 @@ found:
     release(&p->lock);
     return 0;
   }
+  p->kerneltable = ukminit();
+  for(struct proc* q = proc; q < &proc[NPROC]; q++) {
+      uint64 va = KSTACK((int) (q - proc));
+      uint64 pa = kvmpa(va); 
+      ukvmmap(p->kerneltable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      if(q==p)p->kstack = va;
+  }
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -141,7 +148,10 @@ freeproc(struct proc *p)
   p->trapframe = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+  if(p->kerneltable)
+    proc_freekernel(p->kerneltable);
   p->pagetable = 0;
+  p->kerneltable = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -150,6 +160,22 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+}
+
+void
+proc_freekernel(pagetable_t pagetable){
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      proc_freekernel((pagetable_t)child);
+      pagetable[i] = 0;
+    } else if(pte & PTE_V){
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void*)pagetable);
 }
 
 // Create a user page table for a given process,
@@ -474,10 +500,12 @@ scheduler(void)
         p->state = RUNNING;
         c->proc = p;
         swtch(&c->context, &p->context);
-
+        w_satp(MAKE_SATP(p->kerneltable));
+        sfence_vma();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
+        kvminithart();
 
         found = 1;
       }
