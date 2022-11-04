@@ -121,12 +121,11 @@ found:
     return 0;
   }
   p->kerneltable = ukminit();
-  for(struct proc* q = proc; q < &proc[NPROC]; q++) {
-      uint64 va = KSTACK((int) (q - proc));
-      uint64 pa = kvmpa(va); 
-      ukvmmap(p->kerneltable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      if(q==p)p->kstack = va;
-  }
+  uint64 va = KSTACK((int) (p - proc));
+  uint64 pa = kvmpa(va); 
+  ukvmmap(p->kerneltable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -245,6 +244,7 @@ userinit(void)
   // allocate one user page and copy init's instructions
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
+  ukmapcopy(p->pagetable, p->kerneltable, 0, PGSIZE);
   p->sz = PGSIZE;
 
   // prepare for the very first "return" from kernel to user.
@@ -268,12 +268,18 @@ growproc(int n)
   struct proc *p = myproc();
 
   sz = p->sz;
+  uint oldsz = sz;
   if(n > 0){
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    if (ukmapcopy(p->pagetable, p->kerneltable, oldsz, n) < 0){
+      ukmapdel(p->pagetable, p->kerneltable, oldsz, n);
+      return -1;
+    }
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    ukmapdel(p->pagetable, p->kerneltable, sz, oldsz);
   }
   p->sz = sz;
   return 0;
@@ -294,7 +300,8 @@ fork(void)
   }
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0 ||
+    ukmapcopy(np->pagetable, np->kerneltable, 0, p->sz)){
     freeproc(np);
     release(&np->lock);
     return -1;
@@ -499,13 +506,13 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-        swtch(&c->context, &p->context);
         w_satp(MAKE_SATP(p->kerneltable));
         sfence_vma();
+        swtch(&c->context, &p->context);
         // Process is done running for now.
         // It should have changed its p->state before coming back.
-        c->proc = 0;
         kvminithart();
+        c->proc = 0;
 
         found = 1;
       }
