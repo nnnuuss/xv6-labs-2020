@@ -113,6 +113,11 @@ found:
     return 0;
   }
 
+  if((p->resume_trapframe = (struct trapframe *)kalloc()) == 0){
+    release(&p->lock);
+    return 0;
+  }
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -126,6 +131,9 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+  p->lasttick = 0;
+  p->alarmtick = 0;
+  p->handler = 0;
 
   return p;
 }
@@ -139,6 +147,9 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  if(p->resume_trapframe)
+    kfree((void*)p->resume_trapframe);
+  p->resume_trapframe = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -149,6 +160,9 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->handler = 0;
+  p->alarmtick = 0;
+  p->lasttick = 0;
   p->state = UNUSED;
 }
 
@@ -695,5 +709,19 @@ procdump(void)
       state = "???";
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
+  }
+}
+
+void
+backtrace(void){
+  uint64 fp = r_fp();
+  uint64 ra_offset = 8, nexf_offset = 16;
+  printf("backtrace:\n");
+  while(1){
+    uint64* ra = (uint64*)(fp-ra_offset);
+    uint64* nexf = (uint64*)(fp - nexf_offset);
+    if (*ra < KERNBASE)break;
+    printf("%p\n", *ra);
+    fp = *nexf;
   }
 }
