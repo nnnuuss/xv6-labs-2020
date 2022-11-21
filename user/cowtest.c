@@ -18,15 +18,16 @@ simpletest()
   printf("simple: ");
   
   char *p = sbrk(sz);
+  // printf("sbrk is ok\n");
   if(p == (char*)0xffffffffffffffffL){
     printf("sbrk(%d) failed\n", sz);
     exit(-1);
   }
-
+  // printf("check is ok\n");
   for(char *q = p; q < p + sz; q += 4096){
     *(int*)q = getpid();
   }
-
+  // printf("assign is ok\n");
   int pid = fork();
   if(pid < 0){
     printf("fork() failed\n");
@@ -38,6 +39,7 @@ simpletest()
 
   wait(0);
 
+  // printf("wait is ok\n");
   if(sbrk(-sz) == (char*)0xffffffffffffffffL){
     printf("sbrk(-%d) failed\n", sz);
     exit(-1);

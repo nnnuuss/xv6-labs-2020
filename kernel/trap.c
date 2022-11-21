@@ -10,7 +10,7 @@ struct spinlock tickslock;
 uint ticks;
 
 extern char trampoline[], uservec[], userret[];
-
+extern pte_t *walk(pagetable_t pagetable, uint64 va, int alloc);
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
 
@@ -27,6 +27,44 @@ void
 trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
+}
+
+int
+COW_handler(uint64 va){
+  struct proc * p = myproc();
+  if (va > MAXVA){  //检测虚拟地址是否合法
+    printf("va is ileagal\n");
+    return -1;
+  }
+  pte_t * pte = walk(p->pagetable, va, 0);
+  if (pte == 0){
+    printf("pte == 0\n");
+    return -1;
+  }
+  if ((*pte & PTE_V) == 0){                 //检测页表中是否存在对应的pte
+    printf("pte is invalid\n");
+    return -1;
+  }
+  if ((*pte & PTE_U) == 0){
+    printf("pte is invalid\n");
+    return -1;
+  }
+  char *mem;
+  uint64 pa = PTE2PA(*pte);
+  uint flags = PTE_FLAGS(*pte) | PTE_W;
+  va = PGROUNDDOWN(va);
+  if((mem = kalloc()) == 0){                //无内存分配
+    printf("no memory\n");
+    return -1;
+  }
+  memmove(mem, (char*)pa, PGSIZE);          //拷贝实际的内存页
+  uvmunmap(p->pagetable, PGROUNDDOWN(va), 1, 1);
+  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, flags) != 0){
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
 }
 
 //
@@ -67,7 +105,17 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } else if (r_scause() == 15 || r_scause() == 13){
+    uint64 va = r_stval();
+    if (COW_handler(va) < 0){
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    } else{
+      // printf("COW_handler\n");
+    }
+  }
+  else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;

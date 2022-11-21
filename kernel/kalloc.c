@@ -13,6 +13,8 @@ void freerange(void *pa_start, void *pa_end);
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
+int ref_count[600000];
+struct spinlock lock[600000];
 
 struct run {
   struct run *next;
@@ -35,8 +37,13 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  // printf("%d\n", (uint64)p/PGSIZE);
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+    uint64 id = (uint64) p / PGSIZE;
+    initlock(&lock[id], "pagelock");
     kfree(p);
+  }
+  printf("freerange is ok\n");
 }
 
 // Free the page of physical memory pointed at by v,
@@ -56,9 +63,14 @@ kfree(void *pa)
 
   r = (struct run*)pa;
 
+  // uint64 id = (uint64)pa / PGSIZE;
   acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
+  // acquire(&lock[id]);
+  // if (ref_count[id] == 0){
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+  // }
+  // release(&lock[id]);
   release(&kmem.lock);
 }
 
@@ -72,8 +84,13 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  uint64 id = (uint64)r / PGSIZE;
+  acquire(&lock[id]);
+  if(r){
     kmem.freelist = r->next;
+    ref_count[id] = 0;
+  }
+  release(&lock[id]);
   release(&kmem.lock);
 
   if(r)

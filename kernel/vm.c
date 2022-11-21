@@ -5,6 +5,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
 
 /*
  * the kernel's page table.
@@ -14,6 +15,9 @@ pagetable_t kernel_pagetable;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
+
+extern int ref_count[524350];
+extern struct spinlock lock[524350];
 
 /*
  * create a direct-map page table for the kernel.
@@ -158,6 +162,10 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
       return -1;
     if(*pte & PTE_V)
       panic("remap");
+    uint64 id = pa / PGSIZE;
+    acquire(&lock[id]);
+    ref_count[id]++;
+    release(&lock[id]);
     *pte = PA2PTE(pa) | perm | PTE_V;
     if(a == last)
       break;
@@ -186,10 +194,16 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
-    if(do_free){
+    uint64 id = PTE2PA(*pte) / PGSIZE;
+    acquire(&lock[id]);
+    ref_count[id]--;
+    // if (ref_count[id])printf("%d page is use, %d\n", id, ref_count[id]);
+    // if (ref_count[id]==0)printf("%d page is realase\n", id);
+    if(do_free && ref_count[id] == 0){
       uint64 pa = PTE2PA(*pte);
       kfree((void*)pa);
     }
+    release(&lock[id]);
     *pte = 0;
   }
 }
@@ -311,7 +325,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -319,12 +332,9 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    flags = PTE_FLAGS(*pte) & (~PTE_W); //将子进程页中PTE_W清除
+    *pte &= (~PTE_W);                   //清除父进程页中PTE_W
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){ //添加映射
       goto err;
     }
   }
@@ -355,10 +365,17 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
-
+  pte_t *pte;
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
+    if(walkaddr(pagetable, va0) == 0)
+      return -1;
+    pte = walk(pagetable, va0, 0);
+    if (pte == 0)
+      return -1;
+    if ((*pte & PTE_W) == 0)
+      COW_handler(va0);
+    pa0 = PTE2PA(*pte);
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
