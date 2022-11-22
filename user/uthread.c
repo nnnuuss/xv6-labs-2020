@@ -59,6 +59,7 @@ thread_schedule(void)
     next_thread->state = RUNNING;
     t = current_thread;
     current_thread = next_thread;
+    thread_switch((uint64)t->stack, (uint64)current_thread->stack);
     /* YOUR CODE HERE
      * Invoke thread_switch to switch from t to next_thread:
      * thread_switch(??, ??);
@@ -76,6 +77,8 @@ thread_create(void (*func)())
     if (t->state == FREE) break;
   }
   t->state = RUNNABLE;
+  memmove(t->stack, &func, sizeof(func));
+  *(uint64*)(t->stack+8) = (uint64)t->stack + STACK_SIZE;
   // YOUR CODE HERE
 }
 
