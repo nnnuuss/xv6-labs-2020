@@ -22,15 +22,17 @@
 #include "defs.h"
 #include "fs.h"
 #include "buf.h"
-
+#define MAX 13
+#define freeid 13
 struct {
-  struct spinlock lock;
   struct buf buf[NBUF];
-
   // Linked list of all buffers, through prev/next.
   // Sorted by how recently the buffer was used.
   // head.next is most recent, head.prev is least.
-  struct buf head;
+  struct hashnode{
+    struct spinlock lock; //每条散列链表上一个锁
+    struct buf head;
+  }hashtable[MAX];
 } bcache;
 
 void
@@ -38,17 +40,20 @@ binit(void)
 {
   struct buf *b;
 
-  initlock(&bcache.lock, "bcache");
+  for (int i = 0; i < MAX; ++i)
+  initlock(&bcache.hashtable[i].lock, "bcache");
 
   // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
+  for (int i = 0; i < MAX; ++i){  //初始化每条散列链表
+    bcache.hashtable[i].head.prev = &bcache.hashtable[i].head;
+    bcache.hashtable[i].head.next = &bcache.hashtable[i].head;
+  }
+  for(b = bcache.buf; b < bcache.buf+NBUF; b++){  //初始状态把所有空闲块放在单独一条链表上
+    b->next = bcache.hashtable[0].head.next;
+    b->prev = &bcache.hashtable[0].head;
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    bcache.hashtable[0].head.next->prev = b;
+    bcache.hashtable[0].head.next = b;
   }
 }
 
@@ -60,13 +65,14 @@ bget(uint dev, uint blockno)
 {
   struct buf *b;
 
-  acquire(&bcache.lock);
+  uint id = blockno%MAX;
+  acquire(&bcache.hashtable[id].lock);
 
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+  for(b = bcache.hashtable[id].head.next; b != &bcache.hashtable[id].head; b = b->next){  //search buf
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
-      release(&bcache.lock);
+      release(&bcache.hashtable[id].lock);
       acquiresleep(&b->lock);
       return b;
     }
@@ -74,16 +80,39 @@ bget(uint dev, uint blockno)
 
   // Not cached.
   // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
+  for(b = bcache.hashtable[id].head.prev; b != &bcache.hashtable[id].head; b = b->prev){  //找到空闲块
+    if (b->refcnt == 0){
       b->dev = dev;
       b->blockno = blockno;
       b->valid = 0;
       b->refcnt = 1;
-      release(&bcache.lock);
+      release(&bcache.hashtable[id].lock);
       acquiresleep(&b->lock);
       return b;
     }
+  }
+  for (int i = 0; i < MAX; ++i){
+    if (i==id)continue;
+    acquire(&bcache.hashtable[i].lock);
+    for (b = bcache.hashtable[i].head.prev; b != &bcache.hashtable[i].head; b = b->prev){
+      if (b->refcnt == 0){
+        b->dev = dev;
+        b->blockno = blockno;
+        b->valid = 0;
+        b->refcnt = 1;
+        b->prev->next = b->next;
+        b->next->prev = b->prev;
+        b->next = bcache.hashtable[id].head.next; //将节点插入id链中
+        b->prev = &bcache.hashtable[id].head;
+        bcache.hashtable[id].head.next->prev = b;
+        bcache.hashtable[id].head.next = b;
+        release(&bcache.hashtable[i].lock);
+        release(&bcache.hashtable[id].lock);
+        acquiresleep(&b->lock);
+        return b;
+      }
+    }
+    release(&bcache.hashtable[i].lock);
   }
   panic("bget: no buffers");
 }
@@ -93,7 +122,7 @@ struct buf*
 bread(uint dev, uint blockno)
 {
   struct buf *b;
-
+  // printf("bread\n");
   b = bget(dev, blockno);
   if(!b->valid) {
     virtio_disk_rw(b, 0);
@@ -106,6 +135,7 @@ bread(uint dev, uint blockno)
 void
 bwrite(struct buf *b)
 {
+  // printf("write\n");
   if(!holdingsleep(&b->lock))
     panic("bwrite");
   virtio_disk_rw(b, 1);
@@ -121,33 +151,24 @@ brelse(struct buf *b)
 
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  uint id = b->blockno%MAX;
+  acquire(&bcache.hashtable[id].lock);
   b->refcnt--;
-  if (b->refcnt == 0) {
-    // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
-  }
-  
-  release(&bcache.lock);
+  release(&bcache.hashtable[id].lock);
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+  uint id = b->blockno%MAX;
+  acquire(&bcache.hashtable[id].lock);
   b->refcnt++;
-  release(&bcache.lock);
+  release(&bcache.hashtable[id].lock);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+  uint id = b->blockno%MAX;
+  acquire(&bcache.hashtable[id].lock);
   b->refcnt--;
-  release(&bcache.lock);
+  release(&bcache.hashtable[id].lock);
 }
-
-
