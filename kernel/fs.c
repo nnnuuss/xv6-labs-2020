@@ -389,12 +389,35 @@ bmap(struct inode *ip, uint bn)
 
   if(bn < NINDIRECT){
     // Load indirect block, allocating if necessary.
-    if((addr = ip->addrs[NDIRECT]) == 0)
+    if((addr = ip->addrs[NDIRECT]) == 0)  //获取直接映射的内存块
       ip->addrs[NDIRECT] = addr = balloc(ip->dev);
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
-    if((addr = a[bn]) == 0){
+    if((addr = a[bn]) == 0){  //找对应block的地址
       a[bn] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+    return addr;
+  }
+  bn -= NINDIRECT;
+  uint id1 = bn / NINDIRECT;
+  uint id2 = bn % NINDIRECT;
+  uint firstaddr, secondaddr;
+  if (id1 < NINDIRECT){
+    if ((firstaddr = ip->addrs[NDIRECT+1]) == 0)
+      ip->addrs[NDIRECT+1] = firstaddr = balloc(ip->dev);
+    bp = bread(ip->dev, firstaddr);
+    a = (uint*)bp->data;
+    if ((secondaddr = a[id1]) == 0){
+      a[id1] = secondaddr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+    bp = bread(ip->dev, secondaddr);
+    a = (uint*)bp->data;
+    if ((addr = a[id2]) == 0){
+      a[id2] = addr = balloc(ip->dev);
       log_write(bp);
     }
     brelse(bp);
@@ -410,8 +433,8 @@ void
 itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp;
-  uint *a;
+  struct buf *bp, *bp2;
+  uint *a, *b;
 
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
@@ -430,6 +453,26 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  if (ip->addrs[NDIRECT+1]){
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for (i = 0; i < NINDIRECT; ++i){
+      if (a[i]){
+        bp2 = bread(ip->dev, a[i]);
+        b = (uint*)bp2->data;
+        for (j = 0; j < NINDIRECT; ++j){
+          if (b[j])
+            bfree(ip->dev, b[j]);
+        }
+        brelse(bp2);
+        bfree(ip->dev, a[i]);
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   ip->size = 0;
