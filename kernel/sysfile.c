@@ -484,3 +484,88 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void){
+  struct proc* p = myproc();
+  uint64 procaddr;
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  struct file* fp;
+  argaddr(0, &addr);
+  argint(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  argfd(4, &fd, &fp);
+  argint(5, &offset);
+  
+  if (!fp->writable && (flags & MAP_SHARED) && (prot & PROT_WRITE)) //可写权限验证
+    return -1;
+
+  procaddr = p->sz;
+  p->sz += length;
+
+  for (int i = 0; i < 16; ++i){
+    if (p->vma[i].use == 0){
+      p->vma[i].addr = procaddr;
+      p->vma[i].length = length;
+      p->vma[i].p = fp;
+      p->vma[i].permission = flags;
+      p->vma[i].use = 1;
+      break;
+    }
+  }
+  filedup(fp);
+  return procaddr;
+}
+
+uint64
+sys_munmap(void){
+  uint64 addr;
+  int lenth;
+  argaddr(0, &addr);
+  argint(1, &lenth);
+  struct proc * p = myproc();
+  // printf("After\n");
+  for (int i = 0; i < 16; ++i){
+    if (p->vma[i].use && (p->vma[i].addr == addr)){
+      if (walkaddr(p->pagetable, p->vma[i].addr)){
+        struct file * f = p->vma[i].p;
+        int r, writeoff = 0;
+
+        if(f->writable && p->vma[i].permission == MAP_SHARED){
+          int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
+          int off = 0;
+          while(off < lenth){
+            int n1 = lenth - off;
+            if(n1 > max)
+              n1 = max;
+
+            begin_op();
+            ilock(f->ip);
+            if ((r = writei(f->ip, 1, addr + off, writeoff, n1)) > 0)
+              writeoff += r;
+            iunlock(f->ip);
+            end_op();
+
+            if(r != n1){
+              panic("r != n1");
+            }
+            off += r;
+          }
+          if (off != lenth)panic("write back");
+        }
+        uvmunmap(p->pagetable, PGROUNDDOWN(addr), lenth / PGSIZE, 1);
+      }
+      p->vma[i].addr += lenth;
+      p->vma[i].length -= lenth;
+      if (p->vma[i].length <= 0){
+        p->vma[i].use=0;
+        fileclose(p->vma[i].p);
+      }
+      break;
+    }
+  }
+
+  return 0;
+}

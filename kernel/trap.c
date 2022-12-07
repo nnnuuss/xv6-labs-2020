@@ -16,6 +16,56 @@ void kernelvec();
 
 extern int devintr();
 
+extern pte_t *walk(pagetable_t pagetable, uint64 va, int alloc);
+
+struct file {
+  enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE } type;
+  int ref; // reference count
+  char readable;
+  char writable;
+  struct pipe *pipe; // FD_PIPE
+  struct inode *ip;  // FD_INODE and FD_DEVICE
+  uint off;          // FD_INODE
+  short major;       // FD_DEVICE
+};
+
+pte_t *
+pagefault_handler(uint64 va, int kill){
+  struct proc* p = myproc();
+  if (va >= p->sz || va < p->trapframe->sp){
+    p->killed = kill;
+    return 0;
+  }
+  pte_t *pte;
+  if ((pte = walk(p->pagetable, va, 0)) == 0 || (*pte & PTE_V) == 0){
+    char *mem = kalloc();
+    uint64 oldsz = PGROUNDDOWN(va);
+    if(mem == 0){
+      p->killed = kill;
+      return 0;
+    }else{
+      memset(mem, 0, PGSIZE);
+      if(mappages(p->pagetable, oldsz, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
+        kfree(mem);
+        p->killed = kill;
+        return 0;
+      }
+    }
+  }
+  for (int i = 0; i < 16; ++i){
+    if (p->vma[i].use && (va+PGSIZE) <= (p->vma[i].addr + p->vma[i].length) && va >= p->vma[i].addr){ //找到发生页中断位置对应的vma
+      struct file* fp = p->vma[i].p;
+      ilock(fp->ip);
+      int readoff = va - p->vma[i].addr;
+      if (readi(fp->ip, 1, va, readoff, PGSIZE) < 0)
+        panic("readi");
+      iunlock(fp->ip);
+      break;
+    }
+  }
+  return pte;
+}
+
 void
 trapinit(void)
 {
@@ -67,6 +117,9 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if (r_scause() == 13 || r_scause() == 15) {
+    uint64 va = r_stval();
+    pagefault_handler(va, 1);
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

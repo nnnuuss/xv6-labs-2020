@@ -296,6 +296,17 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  for (i = 0; i < 16; ++i){
+    np->vma[i].use = p->vma[i].use;
+    np->vma[i].addr = p->vma[i].addr;
+    np->vma[i].length = p->vma[i].length;
+    np->vma[i].p = p->vma[i].p;
+    np->vma[i].permission = p->vma[i].permission;
+    if (np->vma[i].use){
+      filedup(np->vma[i].p);
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -353,6 +364,18 @@ exit(int status)
     }
   }
 
+  for (int i = 0; i < 16; ++i){
+    if (p->vma[i].use){
+      if (walkaddr(p->pagetable, p->vma[i].addr)){
+        uvmunmap(p->pagetable, PGROUNDDOWN(p->vma[i].addr), p->vma[i].length / PGSIZE, 1);
+        p->vma[i].length = 0;
+        if (p->vma[i].length <= 0){
+          p->vma[i].use=0;
+          fileclose(p->vma[i].p);
+        }
+      }
+    }
+  }
   begin_op();
   iput(p->cwd);
   end_op();

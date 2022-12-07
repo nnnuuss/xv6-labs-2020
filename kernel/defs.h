@@ -146,6 +146,7 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            usertrapret(void);
+pte_t *         pagefault_handler(uint64 va, int kill);
 
 // uart.c
 void            uartinit(void);
